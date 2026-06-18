@@ -27,3 +27,6 @@ DROP USER 'root'@'%';
 (se va adapta in functie de ceea ce se gaseste in server)
 
 Fisierul lamp_change_ssh_port.sh contine si modificarea automata a port-ului pentru SSH in baza input-ului, adica in functie de port-ul care se vrea si va adauga si regula in UFW.
+
+Daca la rularea sudo bash lamp_secure_v3.sh se genereaza o eroare, se va solutiona prin executarea comenzii "sudo sed -i 's/\r//' lamp_secure_v3.sh".
+Eroarea este generata de diferentele dintre Windows (unde s-a generat intreg fisierul) si Ubuntu Server (unde se ruleaza script-ul).
