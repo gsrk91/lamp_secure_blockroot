@@ -68,14 +68,6 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
     mariadb-server \
     php \
     libapache2-mod-php \
-    php-mysql \
-    php-cli \
-    php-curl \
-    php-xml \
-    php-mbstring \
-    php-opcache \
-    php-zip \
-    php-gd \
     unzip \
     curl \
     wget \
@@ -85,6 +77,25 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
     unattended-upgrades \
     apt-listchanges \
     ufw
+
+# Detectare versiune PHP instalată și instalare extensii cu numele corect
+PHP_VER=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || echo "")
+if [[ -z "$PHP_VER" ]]; then
+    error "PHP nu a putut fi detectat după instalare."
+fi
+info "Versiune PHP detectată: $PHP_VER"
+
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    "php${PHP_VER}-mysql" \
+    "php${PHP_VER}-cli" \
+    "php${PHP_VER}-curl" \
+    "php${PHP_VER}-xml" \
+    "php${PHP_VER}-mbstring" \
+    "php${PHP_VER}-opcache" \
+    "php${PHP_VER}-zip" \
+    "php${PHP_VER}-gd" || \
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    php-mysql php-cli php-curl php-xml php-mbstring php-zip php-gd
 
 # ── Activare servicii ──────────────────────────────────────────────────────────
 info "Activare servicii..."
