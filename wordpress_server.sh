@@ -472,38 +472,11 @@ info "UFW activat: SSH, HTTP, HTTPS, Webmin permise."
 section "7 / 9 — Webmin"
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Metoda oficiala Webmin: script de setup de pe GitHub
-# Aceasta gestioneaza automat cheia GPG si repo-ul, compatibil cu Ubuntu modern
-WEBMIN_SETUP_SCRIPT=$(mktemp /tmp/webmin-setup-XXXXXX.sh)
-
-if curl -fsSL https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repos.sh \
-        -o "$WEBMIN_SETUP_SCRIPT"; then
-    # Rulare non-interactiva (accepta automat prompt-ul de setup repo)
-    echo "y" | bash "$WEBMIN_SETUP_SCRIPT"
-    rm -f "$WEBMIN_SETUP_SCRIPT"
-
-    apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --install-recommends webmin
-    systemctl enable --now webmin
-    info "Webmin instalat cu succes via scriptul oficial."
-else
-    warn "Descarcare script Webmin esuata. Incercare metoda alternativa (deb direct)..."
-    rm -f "$WEBMIN_SETUP_SCRIPT"
-
-    WEBMIN_DEB=$(mktemp /tmp/webmin-XXXXXX.deb)
-    if curl -fsSL "https://www.webmin.com/download/deb/webmin-current.deb" -o "$WEBMIN_DEB"; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y "$WEBMIN_DEB"
-        rm -f "$WEBMIN_DEB"
-        systemctl enable --now webmin
-        info "Webmin instalat via pachet .deb direct."
-    else
-        rm -f "$WEBMIN_DEB"
-        warn "Webmin nu a putut fi instalat automat."
-        warn "Instaleaza manual dupa finalizarea scriptului cu:"
-        warn "  curl -o /tmp/webmin-setup.sh https://raw.githubusercontent.com/webmin/webmin/master/webmin-setup-repos.sh"
-        warn "  echo y | bash /tmp/webmin-setup.sh && apt install -y --install-recommends webmin"
-    fi
-fi
+wget https://www.webmin.com/download/deb/webmin-current.deb -O /tmp/webmin.deb
+DEBIAN_FRONTEND=noninteractive apt install -y /tmp/webmin.deb
+rm -f /tmp/webmin.deb
+systemctl enable --now webmin
+info "Webmin instalat."
 
 # ══════════════════════════════════════════════════════════════════════════════
 section "8 / 9 — Actualizări automate & Hardening OS"
