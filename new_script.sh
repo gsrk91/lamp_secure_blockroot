@@ -154,15 +154,17 @@ sed -i 's/^SecResponseBodyAccess .*/SecResponseBodyAccess Off/' /etc/modsecurity
 DEBIAN_FRONTEND=noninteractive apt-get install -y modsecurity-crs 2>/dev/null || \
     warn "modsecurity-crs indisponibil; CRS poate necesita configurare manuala."
 if [[ -d /usr/share/modsecurity-crs ]]; then
+    # IMPORTANT: includem DOAR fisierul *.load (owasp-crs.load), care la randul lui
+    # incarca crs-setup.conf + rules/*.conf. NU includem si rules/*.conf separat,
+    # altfel regulile se incarca de doua ori -> "another rule with the same id".
     cat > /etc/apache2/mods-available/security2.conf << 'EOF'
 <IfModule security2_module>
     SecDataDir /var/cache/modsecurity
     IncludeOptional /etc/modsecurity/*.conf
     IncludeOptional /usr/share/modsecurity-crs/*.load
-    IncludeOptional /usr/share/modsecurity-crs/rules/*.conf
 </IfModule>
 EOF
-    info "OWASP CRS legat la ModSecurity."
+    info "OWASP CRS legat la ModSecurity (incarcare unica)."
 fi
 
 # mod_evasive (anti DoS)
