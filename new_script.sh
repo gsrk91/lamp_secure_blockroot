@@ -338,22 +338,29 @@ cat > /etc/fail2ban/jail.local << EOF
 bantime         = 86400
 findtime        = 600
 maxretry        = 3
-ignoreip        = 127.0.0.1/8 ::1 ${LAN_SUBNET}
+# ignoreip include DOAR localhost - NU toata subreteaua LAN
+# (un dispozitiv compromis din LAN nu trebuie sa fie imun la ban)
+ignoreip        = 127.0.0.1/8 ::1
 banaction       = ufw
 banaction_allports = ufw
 
+# ── SSH ──────────────────────────────────────────────────────────────────────
 [sshd]
 enabled  = true
 port     = ssh
 logpath  = /var/log/auth.log
 maxretry = 3
+bantime  = 86400
 
+# ── Apache - autentificare ────────────────────────────────────────────────────
 [apache-auth]
 enabled  = true
 port     = http,https
 filter   = apache-auth
 logpath  = /var/log/apache2/error.log
+maxretry = 3
 
+# ── Apache - boti rau intentionati ───────────────────────────────────────────
 [apache-badbots]
 enabled  = true
 port     = http,https
@@ -362,19 +369,24 @@ logpath  = /var/log/apache2/access.log
 maxretry = 1
 bantime  = 604800
 
+# ── Apache - cereri fara script (scanere) ─────────────────────────────────────
 [apache-noscript]
 enabled  = true
 port     = http,https
 filter   = apache-noscript
 logpath  = /var/log/apache2/error.log
+maxretry = 3
 
+# ── Apache - overflow/buffer attacks ──────────────────────────────────────────
 [apache-overflows]
 enabled  = true
 port     = http,https
 filter   = apache-overflows
 logpath  = /var/log/apache2/error.log
 maxretry = 2
+bantime  = 604800
 
+# ── Apache - Shellshock (CVE-2014-6271) ───────────────────────────────────────
 [apache-shellshock]
 enabled  = true
 port     = http,https
@@ -383,6 +395,7 @@ logpath  = /var/log/apache2/error.log
 maxretry = 1
 bantime  = 604800
 
+# ── ModSecurity WAF ───────────────────────────────────────────────────────────
 [apache-modsecurity]
 enabled  = true
 port     = http,https
@@ -391,14 +404,16 @@ logpath  = /var/log/apache2/error.log
 maxretry = 3
 bantime  = 604800
 
+# ── WordPress - atac xmlrpc (DDoS amplification + brute-force) ───────────────
 [wordpress-xmlrpc]
 enabled  = true
 port     = http,https
 filter   = wordpress-xmlrpc
 logpath  = /var/log/apache2/*access.log
-maxretry = 2
+maxretry = 1
 bantime  = 604800
 
+# ── WordPress - brute-force pe pagina de login ────────────────────────────────
 [wordpress-login]
 enabled  = true
 port     = http,https
@@ -408,6 +423,26 @@ maxretry = 5
 findtime = 300
 bantime  = 86400
 
+# ── Scanere de vulnerabilitati (WPScan, Nikto, etc.) ─────────────────────────
+[wordpress-scanner]
+enabled  = true
+port     = http,https
+filter   = wordpress-scanner
+logpath  = /var/log/apache2/*access.log
+maxretry = 10
+findtime = 60
+bantime  = 604800
+
+# ── Cereri catre fisiere sensibile (.env, .git, wp-config, etc.) ─────────────
+[apache-sensitive-files]
+enabled  = true
+port     = http,https
+filter   = apache-sensitive-files
+logpath  = /var/log/apache2/*access.log
+maxretry = 2
+bantime  = 604800
+
+# ── Recidivisti (banati de 3 ori in 24h -> 14 zile) ──────────────────────────
 [recidive]
 enabled   = true
 logpath   = /var/log/fail2ban.log
@@ -417,30 +452,51 @@ findtime  = 86400
 maxretry  = 3
 EOF
 
+# ── Filtre personalizate ───────────────────────────────────────────────────────
+
 cat > /etc/fail2ban/filter.d/wordpress-xmlrpc.conf << 'EOF'
 [Definition]
 failregex = ^<HOST> .* "POST .*xmlrpc\.php
 ignoreregex =
 EOF
+
 cat > /etc/fail2ban/filter.d/wordpress-login.conf << 'EOF'
 [Definition]
 failregex = ^<HOST> .* "POST .*wp-login\.php
 ignoreregex =
 EOF
+
 cat > /etc/fail2ban/filter.d/apache-shellshock.conf << 'EOF'
 [Definition]
 failregex = ^<HOST> .*\(\) \{
 ignoreregex =
 EOF
+
+# Fix: regex pe o singura linie per varianta, prefix 'failregex +=' pentru a doua
 cat > /etc/fail2ban/filter.d/apache-modsecurity.conf << 'EOF'
 [Definition]
 failregex = \[client <HOST>\] ModSecurity: Access denied
-            ModSecurity:.*\[client <HOST>\]
+ignoreregex =
+EOF
+
+# Scanere - User-Agent cunoscute + pattern-uri de scan masiv
+cat > /etc/fail2ban/filter.d/wordpress-scanner.conf << 'EOF'
+[Definition]
+failregex = ^<HOST> .* "(GET|POST|HEAD) .*(wp-content/plugins/|wp-includes/|\.php\?).* HTTP.*" (404|403|400) .*$
+            ^<HOST> .*"(GET|POST) /(\?|index\.php\?|xmlrpc\.php|wp-json/).* HTTP.*" 4[0-9][0-9] .*$
+ignoreregex = ^<HOST> .* "GET /wp-content/uploads/
+              ^<HOST> .* "GET /wp-content/themes/
+EOF
+
+# Cereri catre fisiere sensibile
+cat > /etc/fail2ban/filter.d/apache-sensitive-files.conf << 'EOF'
+[Definition]
+failregex = ^<HOST> .* "(GET|POST) .*(/\.env|/\.git|/wp-config\.php|/wp-config\.bak|/etc/passwd|/etc/shadow|/\.htaccess|/xmlrpc\.php|/readme\.html|/license\.txt|/web\.config|/\.svn|/backup|/dump\.sql)
 ignoreregex =
 EOF
 
 systemctl restart fail2ban
-info "Fail2Ban activ (SSH, Apache, ModSecurity, WordPress, recidive)."
+info "Fail2Ban activ (SSH, Apache, ModSecurity, WordPress, scanere, fisiere sensibile, recidive)."
 
 # ══════════════════════════════════════════════════════════════════════════════
 section "6/11 - UFW Firewall (hardened, admin LAN-only)"
@@ -464,9 +520,10 @@ ufw allow 80/tcp                comment 'HTTP public'
 ufw allow 443/tcp               comment 'HTTPS public'
 
 # Admin DOAR din LAN
-ufw allow from "$LAN_SUBNET" to any port 22    proto tcp comment 'SSH LAN'
+# NOTA: pentru SSH folosim DOAR 'limit' (max 6 conexiuni/30s) - nu si 'allow' separat
+# (daca ambele exista, se anuleaza reciproc; 'limit' include si permisiunea de acces)
+ufw limit from "$LAN_SUBNET" to any port 22    proto tcp comment 'SSH LAN - rate limited'
 ufw allow from "$LAN_SUBNET" to any port 10000 proto tcp comment 'Webmin LAN'
-ufw limit from "$LAN_SUBNET" to any port 22    proto tcp comment 'SSH rate limit'
 
 ufw --force enable
 info "UFW: web public (80/443); SSH+Webmin doar din $LAN_SUBNET."
