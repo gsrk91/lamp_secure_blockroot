@@ -27,11 +27,11 @@ Opțiunea 2 — manual, dacă e un singur site și nu vrei helper
 bash# 1. Creezi directorul si pui fisierul tau
 sudo mkdir -p /var/www/domeniu.ro
 sudo cp index.html /var/www/domeniu.ro/
-# 2. Permisiuni
+2. Permisiuni
 sudo chown -R www-data:www-data /var/www/domeniu.ro
 sudo find /var/www/domeniu.ro -type d -exec chmod 755 {} \;
 sudo find /var/www/domeniu.ro -type f -exec chmod 644 {} \;
-# 3. VirtualHost
+3. VirtualHost
 sudo tee /etc/apache2/sites-available/domeniu.ro.conf > /dev/null << 'EOF'
 <VirtualHost *:80>
     ServerName domeniu.ro
@@ -47,7 +47,7 @@ sudo tee /etc/apache2/sites-available/domeniu.ro.conf > /dev/null << 'EOF'
     CustomLog ${APACHE_LOG_DIR}/domeniu.ro-access.log combined
 </VirtualHost>
 EOF
-# 4. Activezi si reincarci
+4. Activezi si reincarci
 sudo a2ensite domeniu.ro.conf
 sudo systemctl reload apache2
 Diferența cheie față de add-wp-site: un site static n-are nevoie de PHP rulat pe fișiere, deci VirtualHost-ul e mai simplu și 
@@ -56,10 +56,10 @@ Options -Indexes rămâne în ambele, ca să nu se poată lista conținutul dire
 Pentru SSL gratuit, după ce domeniul pointează către IP-ul serverului: sudo certbot --apache -d domeniu.ro -d www.domeniu.ro — funcționează 
 identic și pentru site-uri statice.
 
-# Site WordPress complet (cu baza de date)
+Site WordPress complet (cu baza de date)
 sudo add-wp-site domeniu.ro nume_db user_db parola_db
 
-# Site static (doar HTML/CSS/JS, fara DB)
+Site static (doar HTML/CSS/JS, fara DB)
 sudo add-static-site domeniu.ro
 
 Ambele apar și în sumarul afișat la finalul instalării, ca să le ai la îndemână. 
