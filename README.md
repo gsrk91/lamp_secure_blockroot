@@ -1,10 +1,10 @@
-Nu uita să-i dai permisiuni de execuție pe server: chmod +x lamp_secure_blockroot.sh
-Apoi rulează-l cu: sudo ./nume_script.sh sau sudo bash nume_script.sh
+Nu uita să-i dai permisiuni de execuție pe server: sudo chmod +x final_boss.sh
+Apoi rulează-l cu: sudo ./final_boss.sh sau sudo bash final_boss.sh
 
 Fisierul lamp_change_ssh_port.sh contine si modificarea automata a port-ului pentru SSH in baza input-ului, 
 adica in functie de port-ul care se vrea si va adauga si regula in UFW.
 
-Daca la rularea sudo bash nume_script.sh se genereaza o eroare, se va solutiona prin executarea comenzii "sudo sed -i 's/\r//' nume_script.sh". 
+Daca la rularea sudo bash nume_script.sh se genereaza o eroare, se va solutiona prin executarea comenzii "sudo sed -i 's/\r//' final_boss.sh". 
 Eroarea este generata de diferentele dintre Windows (unde s-a generat intreg fisierul) si Ubuntu Server (unde se ruleaza script-ul).
 
 Scriptul final_boss.sh îți cere subrețeaua LAN și portul SSH la început, apoi face totul automat. 
