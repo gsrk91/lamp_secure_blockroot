@@ -1,3 +1,4 @@
+Descarcarea se face prin: curl -sSL "https://raw.githubusercontent.com/gsrk91/lamp_secure_blockroot/refs/heads/main/final_boss.sh" -o final_boss.sh
 Nu uita să-i dai permisiuni de execuție pe server: sudo chmod +x final_boss.sh
 Apoi rulează-l cu: sudo ./final_boss.sh sau sudo bash final_boss.sh
 
