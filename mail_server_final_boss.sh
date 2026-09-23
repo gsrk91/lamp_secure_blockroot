@@ -138,6 +138,18 @@ echo
 echo "  ── Mailjet (relay SMTP de iesire) ─────────────────────────────────────"
 echo "  Gaseste-le in Mailjet: Account Settings -> SMTP and SEND API Settings."
 echo "  Secret Key se afiseaza o SINGURA data la generare - ai-o pregatita."
+echo
+echo "  ${BOLD}ATENTIE - riscul real al acestei perechi de chei:${NC}"
+echo "  Mailjet NU emite credentiale separate doar-pentru-SMTP. Aceeasi pereche"
+echo "  API Key + Secret Key da acces COMPLET la API-ul REST v3: liste de"
+echo "  contacte, campanii, statistici, setari de cont. Cine fura cheia de pe"
+echo "  serverul asta nu iti trimite doar spam - iti citeste tot contul."
+echo
+echo "  ${BOLD}Foloseste o cheie de SUB-ACCOUNT, nu cheia principala.${NC}"
+echo "  Mailjet -> Account -> Sub-accounts -> creeaza unul dedicat acestui server."
+echo "  Cheia de sub-account poate trimite doar pentru expeditorii validati in"
+echo "  acel sub-account, deci compromiterea ei nu atinge contul principal."
+echo
 read -r -p "  -> Mailjet API Key: " MAILJET_API_KEY
 while [[ -z "${MAILJET_API_KEY:-}" ]]; do
     warn "API Key nu poate fi gol."
@@ -160,14 +172,55 @@ echo "  Creeaza un API Token (NU Global API Key) in Cloudflare:"
 echo "    dash.cloudflare.com -> My Profile -> API Tokens -> Create Token"
 echo "    Permisiuni: Zone / DNS / Edit  +  Zone / Zone / Read"
 echo "    Resurse: doar zona ${PRIMARY_DOMAIN} (nu toate zonele din cont)."
-read -rs -p "  -> Cloudflare API Token: " CF_TOKEN
 echo
-while [[ -z "${CF_TOKEN:-}" ]]; do
-    warn "Token-ul nu poate fi gol."
-    read -rs -p "  -> Cloudflare API Token: " CF_TOKEN
-    echo
+echo "  Token-ul SE VEDE pe masura ce il tastezi (e lung, ca sa-l poti verifica)."
+echo "  Nu ajunge in ${LOG}: ecoul caracterelor tastate il face terminalul,"
+echo "  nu stdout-ul scriptului, deci 'tee' nu il captureaza."
+echo "  Ramane insa in scrollback-ul terminalului - da 'clear' dupa instalare."
+echo
+while true; do
+    read -r -p "  -> Cloudflare API Token: " CF_TOKEN || true
+    CF_TOKEN="${CF_TOKEN//[[:space:]]/}"
+
+    if [[ -z "${CF_TOKEN:-}" ]]; then
+        warn "Token-ul nu poate fi gol."
+        continue
+    fi
+
+    if [[ -w /dev/tty ]]; then
+        printf '     ai introdus %d caractere: %s...%s\n' \
+            "${#CF_TOKEN}" "${CF_TOKEN:0:4}" "${CF_TOKEN: -4}" > /dev/tty 2>/dev/null || true
+    fi
+
+    # Validam ACUM, nu la pasul 10/11 - altfel afli ca ai gresit o litera dupa
+    # ~20 de minute de instalare iRedMail.
+    if ! command -v curl >/dev/null 2>&1; then
+        warn "curl nu e instalat inca - sar peste verificarea token-ului."
+        break
+    fi
+
+    echo "     Verific token-ul la Cloudflare..."
+    CF_CHECK="$(curl -fsS -m 20 \
+        -H "Authorization: Bearer ${CF_TOKEN}" \
+        -H "Content-Type: application/json" \
+        "https://api.cloudflare.com/client/v4/user/tokens/verify" 2>/dev/null || true)"
+
+    CF_CHECK_COMPACT="${CF_CHECK//[[:space:]]/}"
+    if [[ "$CF_CHECK_COMPACT" == *'"success":true'* ]]; then
+        info "Token valid si activ la Cloudflare."
+        break
+    fi
+
+    warn "Cloudflare NU a acceptat token-ul (sau serverul nu are internet)."
+    if [[ -n "$CF_CHECK" ]]; then
+        echo "     Raspuns API: $CF_CHECK"
+    else
+        echo "     Niciun raspuns de la api.cloudflare.com."
+    fi
+    _cf_retry=""
+    read -r -p "  Reintroduci token-ul? (da = reincerc / nu = continui oricum): " _cf_retry || true
+    [[ "${_cf_retry,,}" == "da" ]] || { warn "Continui cu token-ul neverificat."; break; }
 done
-info "Token Cloudflare primit (nu va fi afisat in log)."
 warn "IMPORTANT: verifica in Cloudflare ca inregistrarea DNS pentru ${MAIL_FQDN}"
 warn "este 'DNS only' (nor gri), NU 'Proxied' (nor portocaliu) - altfel clientii"
 warn "de mail (SMTP/IMAP) nu se vor putea conecta (Cloudflare nu proxy-eaza mail)."
@@ -296,20 +349,60 @@ warn "propriul firewall (iptables), raspunde NU - UFW deja acopera tot."
 section "4/11 - Instalare iRedMail (PARTEA INTERACTIVA)"
 # ══════════════════════════════════════════════════════════════════════════════
 cd /usr/local/src
-IRM_VERSION=$(curl -fsSL https://api.github.com/repos/iredmail/iRedMail/releases/latest | \
-    grep -oP '"tag_name":\s*"\K[^"]+' || true)
-IRM_VERSION="${IRM_VERSION:-1.7.4}"
-IRM_TARBALL="iRedMail-${IRM_VERSION}.tar.bz2"
 
-if [[ ! -f "$IRM_TARBALL" ]]; then
+# ── Detectarea versiunii ──────────────────────────────────────────────────────
+# iRedMail NU publica "GitHub Releases", ci doar TAG-uri. Apelul la
+#   https://api.github.com/repos/iredmail/iRedMail/releases/latest
+# returneaza 404 (exact 'curl: (22) ... error: 404' pe care il vezi in consola),
+# scriptul cadea pe fallback-ul hardcodat 1.7.4 - o versiune care NU cunoaste
+# Ubuntu 26.04, de unde eroarea:
+#   "Release version of the operating system on this server is unsupported"
+# Citim tag-ul cel mai recent din API-ul de TAGS, care functioneaza.
+info "Detectez ultima versiune iRedMail..."
+IRM_VERSION="$(curl -fsSL --max-time 30 \
+    "https://api.github.com/repos/iredmail/iRedMail/tags" 2>/dev/null | \
+    grep -oP '"name":\s*"\K[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+IRM_VERSION="${IRM_VERSION:-1.8.8}"
+info "Versiune iRedMail folosita: ${IRM_VERSION}"
+
+# ── Verificare preventiva a compatibilitatii OS ───────────────────────────────
+# Mai bine oprim aici, cu un mesaj clar, decat dupa ~15 minute de instalare.
+# Lista suportata de iRedMail 1.8.8: Ubuntu 26.04 / 24.04 (recomandat) / 22.04.
+case "$UBUNTU_VERSION" in
+    22.04|24.04|26.04)
+        info "Ubuntu ${UBUNTU_VERSION} figureaza in lista suportata de iRedMail."
+        [[ "$UBUNTU_VERSION" == "26.04" ]] && \
+            warn "Ubuntu 26.04 e suportat, dar iRedMail recomanda oficial 24.04 LTS (mai testat)."
+        ;;
+    *)
+        warn "Ubuntu ${UBUNTU_VERSION} NU figureaza in lista suportata de iRedMail"
+        warn "(22.04 / 24.04 recomandat / 26.04)."
+        warn "Instalatorul se va opri cu:"
+        warn "  'Release version of the operating system on this server is unsupported'"
+        warn "Verifica lista actualizata: https://www.iredmail.org/download.html"
+        read -r -p "  -> Continui oricum? (da/nu): " OS_CONFIRM || true
+        [[ "${OS_CONFIRM,,}" == "da" ]] || \
+            error "Oprit. Reinstaleaza pe o versiune Ubuntu LTS suportata de iRedMail."
+        ;;
+esac
+
+IRM_TARBALL="iRedMail-${IRM_VERSION}.tar.gz"
+IRM_DIR="/usr/local/src/iRedMail-${IRM_VERSION}"
+
+# -s (nu -f): un fisier gol ramas de la o descarcare esuata anterioara ar fi
+# trecut de test si ar fi rupt dezarhivarea.
+if [[ ! -s "$IRM_TARBALL" ]]; then
     info "Descarc iRedMail ${IRM_VERSION}..."
     wget -q "https://github.com/iredmail/iRedMail/archive/refs/tags/${IRM_VERSION}.tar.gz" \
-        -O "$IRM_TARBALL" || error "Nu am putut descarca iRedMail. Verifica versiunea/link-ul manual pe https://www.iredmail.org/download.html"
+        -O "$IRM_TARBALL" || \
+        error "Nu am putut descarca iRedMail ${IRM_VERSION}. Verifica manual pe https://www.iredmail.org/download.html"
 fi
-rm -rf "iRedMail-${IRM_VERSION}"
-mkdir -p "iRedMail-${IRM_VERSION}"
-tar -xzf "$IRM_TARBALL" -C "iRedMail-${IRM_VERSION}" --strip-components=1
-cd "iRedMail-${IRM_VERSION}"
+
+rm -rf "$IRM_DIR"
+mkdir -p "$IRM_DIR"
+tar -xzf "$IRM_TARBALL" -C "$IRM_DIR" --strip-components=1 || \
+    error "Arhiva iRedMail e corupta. Sterge ${IRM_TARBALL} si reia scriptul."
+cd "$IRM_DIR"
 
 cat << EOF
 
@@ -364,19 +457,39 @@ systemctl restart postfix
 info "Postfix configurat sa foloseasca Mailjet (${MAILJET_HOST}:${MAILJET_PORT}) ca relay de iesire."
 
 echo
-info "Trimit un e-mail de test catre ${ADMIN_EMAIL} prin Mailjet (verificare credentiale)..."
-if swaks --to "$ADMIN_EMAIL" --from "postmaster@${PRIMARY_DOMAIN}" \
-        --server "$MAILJET_HOST" --port "$MAILJET_PORT" \
-        --auth LOGIN --auth-user "$MAILJET_API_KEY" --auth-password "$MAILJET_SECRET_KEY" \
-        --tls \
-        --header "Subject: Test relay Mailjet - $(date '+%Y-%m-%d %H:%M')" \
-        --body "Daca primesti acest e-mail, relay-ul Postfix -> Mailjet functioneaza corect." \
-        > /tmp/swaks_test.log 2>&1; then
-    info "Test SMTP catre Mailjet: SUCCES. Verifica inbox-ul ${ADMIN_EMAIL}."
+# Testam prin POSTFIX, nu cu swaks direct.
+# Motiv de securitate: 'swaks --auth-password "$SECRET"' pune cheia in linia de
+# comanda, iar linia de comanda a oricarui proces e vizibila in /proc si in
+# `ps aux` pentru ORICE utilizator local, cat timp ruleaza. Pe un server unde
+# tocmai te ingrijoreaza furtul cheii, e exact ce nu vrei.
+# Bonus: asa testam fluxul REAL de productie (Postfix -> Mailjet), nu o
+# conexiune paralela care poate reusi chiar daca Postfix e gresit configurat.
+info "Trimit un e-mail de test prin Postfix (deci prin relay-ul Mailjet)..."
+TEST_SUBJECT="Test relay Mailjet - $(date '+%Y-%m-%d %H:%M:%S')"
+if printf 'Subject: %s\nFrom: postmaster@%s\nTo: %s\n\n%s\n' \
+        "$TEST_SUBJECT" "$PRIMARY_DOMAIN" "$ADMIN_EMAIL" \
+        "Daca primesti acest e-mail, relay-ul Postfix -> Mailjet functioneaza corect." \
+        | sendmail -f "postmaster@${PRIMARY_DOMAIN}" "$ADMIN_EMAIL"; then
+
+    info "Mesaj predat lui Postfix. Astept confirmarea livrarii catre Mailjet..."
+    sleep 10
+    MAILLOG="/var/log/mail.log"
+    [[ -f "$MAILLOG" ]] || MAILLOG="/var/log/maillog"
+
+    if grep -q "relay=${MAILJET_HOST}.*status=sent" "$MAILLOG" 2>/dev/null; then
+        info "Test relay: SUCCES - Mailjet a acceptat mesajul. Verifica ${ADMIN_EMAIL}."
+    elif grep -qi "relay=${MAILJET_HOST}.*\(status=bounced\|SASL\|authentication failed\)" "$MAILLOG" 2>/dev/null; then
+        warn "Mailjet a RESPINS autentificarea. Cauze frecvente:"
+        warn "  - API Key / Secret Key gresite sau inversate"
+        warn "  - expeditorul postmaster@${PRIMARY_DOMAIN} nu e validat in Mailjet"
+        warn "Detalii: sudo grep ${MAILJET_HOST} ${MAILLOG} | tail -20"
+    else
+        warn "Inca nu am confirmarea livrarii (poate dura). Verifica peste un minut:"
+        warn "  sudo mailq"
+        warn "  sudo grep ${MAILJET_HOST} ${MAILLOG} | tail -20"
+    fi
 else
-    warn "Test SMTP catre Mailjet a esuat. Detalii in /tmp/swaks_test.log."
-    warn "Verifica: API Key/Secret corecte, domeniul expeditor verificat in Mailjet,"
-    warn "si ca DNS-ul (SPF/DKIM) e configurat asa cum e afisat la finalul scriptului."
+    warn "Postfix nu a acceptat mesajul de test. Verifica: systemctl status postfix"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -719,11 +832,36 @@ echo "  DKIM Mailjet (separat, pentru mail-ul trimis PRIN Mailjet ca relay):"
 echo "     adauga in Mailjet -> Account -> DNS/Domains domeniul ${PRIMARY_DOMAIN},"
 echo "     apoi copiaza inregistrarile TXT afisate acolo (mailjet._domainkey + verificare domeniu)."
 echo
+echo "  === SECURITATEA CHEII MAILJET (citeste, e important) ==="
+echo "  Cheia e salvata in /etc/postfix/sasl_passwd (+ .db), ambele 600 root."
+echo "  Asta o protejeaza de alti utilizatori locali, NU de un atacator care"
+echo "  obtine root pe acest server."
+echo
+echo "  Mailjet NU are credentiale separate doar-pentru-SMTP: aceeasi pereche"
+echo "  da acces complet la API-ul REST (contacte, campanii, setari cont)."
+echo "  Masuri concrete, in ordinea impactului:"
+echo "   1. Foloseste o cheie de SUB-ACCOUNT dedicata acestui server, nu cheia"
+echo "      principala. Compromiterea ei nu atinge contul principal."
+echo "   2. Roteste cheia periodic (trimestrial) si OBLIGATORIU daca banuiesti"
+echo "      o scurgere. Dupa rotatie, reruleaza doar sectiunea 5/11."
+echo "   3. Activeaza alertele de volum in Mailjet (Account -> Notifications)."
+echo "      Un furt de cheie se vede intai ca varf brusc de trimiteri."
+echo "   4. Verifica saptamanal Mailjet -> Statistics ce expeditori si ce volume"
+echo "      apar. Trimiteri de la adrese pe care nu le recunosti = cheie furata."
+echo "   5. Intreaba suportul Mailjet daca planul tau permite restrictionarea"
+echo "      cheii pe IP. Daca da, limiteaz-o la IP-ul public al acestui server -"
+echo "      e singura masura care face cheia inutila in alta parte."
+echo
+echo "  Unde s-au scurs chei in trecut, in ordinea frecventei: commit intr-un"
+echo "  repo git, fisier de config al unei aplicatii web expuse, backup"
+echo "  nesecurizat, log de CI/CD. Verifica si acolo, nu doar pe server."
+echo
 echo "  === VERIFICARI ==="
 echo "    sudo fail2ban-client status"
 echo "    sudo ufw status verbose"
-echo "    sudo swaks --to test@extern.ro --from postmaster@${PRIMARY_DOMAIN} --server localhost"
-echo "    cat /tmp/swaks_test.log   (rezultatul testului Mailjet de mai devreme)"
+echo "    sudo mailq                                    (coada de trimitere)"
+echo "    sudo grep ${MAILJET_HOST} /var/log/mail.log | tail -20"
+echo "    sudo postconf -n | grep -E 'relayhost|sasl'   (config relay)"
 echo "    sudo ${ACME_BIN} --list                       (starea certificatului Let's Encrypt)"
 echo "    echo | openssl s_client -connect ${MAIL_FQDN}:993 2>/dev/null | openssl x509 -noout -dates"
 echo
