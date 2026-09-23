@@ -30,7 +30,10 @@
 #    ce sa raspunzi, apoi preia controlul inapoi pentru tot restul (Mailjet,
 #    firewall, fail2ban, hardening).
 #
-#  Compatibil: Ubuntu Server 22.04 / 24.04 LTS, minim 2 vCPU / 4GB RAM / 20GB disk
+#  Compatibil: Ubuntu Server 22.04 / 24.04 LTS (recomandat) / 26.04 LTS
+#              minim 2 vCPU / 4GB RAM / 20GB disk
+#  NOTA 26.04: SOGo nu are inca pachete pentru codename-ul 'resolute'. Scriptul
+#              verifica automat si iti spune sa il debifezi in wizard.
 #  Rulare:     sudo bash mail_server_final_boss.sh
 # ==============================================================================
 
@@ -386,6 +389,27 @@ case "$UBUNTU_VERSION" in
         ;;
 esac
 
+# ── SOGo: are pachete pentru ACEASTA versiune de Ubuntu? ──────────────────────
+# iRedMail adauga automat repo-ul SOGo folosind CODENAME-ul distributiei:
+#   deb https://packages.sogo.nu/nightly/5/ubuntu <codename> <codename>
+# Echipa SOGo construieste pachete per codename si ramane des in urma cu
+# versiunile noi de Ubuntu. Daca repo-ul nu exista, `apt update` returneaza 404
+# la fiecare fisier de index => exact "erorile de fetching" din timpul instalarii,
+# iar instalarea se opreste pentru ca pachetele sogo/sope nu pot fi gasite.
+# Verificam INAINTE si iti spunem exact ce sa debifezi in wizard.
+DISTRO_CODENAME="$(awk -F'=' '/^VERSION_CODENAME=/ {print $2}' /etc/os-release | tr -d '"')"
+SOGO_AVAILABLE="nu"
+if [[ -n "$DISTRO_CODENAME" ]]; then
+    info "Verific daca SOGo are pachete pentru Ubuntu ${UBUNTU_VERSION} (${DISTRO_CODENAME})..."
+    if curl -fsI -m 20 "https://packages.sogo.nu/nightly/5/ubuntu/dists/${DISTRO_CODENAME}/Release" >/dev/null 2>&1; then
+        SOGO_AVAILABLE="da"
+        info "SOGo: pachete disponibile pentru ${DISTRO_CODENAME}."
+    else
+        warn "SOGo NU are pachete pentru Ubuntu ${DISTRO_CODENAME} (HTTP 404)."
+        warn "Daca il selectezi in wizard, instalarea va esua cu erori de fetching."
+    fi
+fi
+
 IRM_TARBALL="iRedMail-${IRM_VERSION}.tar.gz"
 IRM_DIR="/usr/local/src/iRedMail-${IRM_VERSION}"
 
@@ -404,6 +428,12 @@ tar -xzf "$IRM_TARBALL" -C "$IRM_DIR" --strip-components=1 || \
     error "Arhiva iRedMail e corupta. Sterge ${IRM_TARBALL} si reia scriptul."
 cd "$IRM_DIR"
 
+if [[ "$SOGO_AVAILABLE" == "da" ]]; then
+    SOGO_HINT="SOGo = optional (are pachete pentru ${DISTRO_CODENAME})"
+else
+    SOGO_HINT="SOGo = DEBIFEAZA-L OBLIGATORIU (nu are pachete pentru ${DISTRO_CODENAME})"
+fi
+
 cat << EOF
 
 ${BOLD}${YELLOW}=====================================================================
@@ -413,12 +443,30 @@ ${BOLD}${YELLOW}================================================================
   - First domain:           ${PRIMARY_DOMAIN}
   - Domain admin password:  o parola PUTERNICA - noteaz-o intr-un manager de parole
   - Backend:                MySQL/MariaDB (recomandat, mai simplu de intretinut)
-  - Componente:             lasa selectate implicit (Roundcube, SOGo, Fail2Ban = DA)
+
+  - Componente (ecranul cu checkbox-uri, SPACE bifeaza/debifeaza):
+      Roundcube (webmail)   = DA
+      iRedAdmin             = DA
+      Fail2Ban              = DA
+      ${SOGO_HINT}
+      netdata               = DEBIFEAZA-L (318 MB de descarcat, serviciu de
+                              monitorizare in plus pe care nu il folosesti)
+
   - Firewall propriu iptables al iRedMail:  raspunde NU (UFW e deja configurat)
   - La final, ALEGE "y" pentru a incepe instalarea propriu-zisa.
 ${BOLD}${YELLOW}=====================================================================${NC}
 
 EOF
+
+if [[ "$SOGO_AVAILABLE" != "da" ]]; then
+    warn "REPET, pentru ca aici se opreste instalarea daca gresesti:"
+    warn "  DEBIFEAZA SOGo in ecranul de componente."
+    warn "  Altfel iRedMail adauga repo-ul SOGo pentru '${DISTRO_CODENAME}', care"
+    warn "  nu exista, si apt esueaza cu 404 la fiecare fisier de index."
+    warn "  Pierzi doar CalDAV/CardDAV/ActiveSync. Webmail-ul (Roundcube) ramane."
+    warn "  Daca ai NEVOIE de SOGo, reinstaleaza pe Ubuntu 24.04 LTS (noble)."
+    echo
+fi
 read -r -p "  Apasa ENTER cand esti gata sa pornesti wizard-ul iRedMail..." _
 
 # Rulam DIRECT pe /dev/tty pentru ca whiptail/dialog au nevoie de un terminal
