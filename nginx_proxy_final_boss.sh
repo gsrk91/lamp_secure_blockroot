@@ -131,14 +131,62 @@ if [[ "$SETUP_MAIL_PROXY" == "da" ]]; then
     echo "    dash.cloudflare.com -> My Profile -> API Tokens -> Create Token"
     echo "    Permisiuni: Zone / DNS / Edit  +  Zone / Zone / Read"
     echo "    Resurse: doar zona domeniului tau de mail."
-    read -rs -p "  -> Cloudflare API Token: " CF_TOKEN
     echo
-    while [[ -z "${CF_TOKEN:-}" ]]; do
-        warn "Token-ul nu poate fi gol."
-        read -rs -p "  -> Cloudflare API Token: " CF_TOKEN
-        echo
+    echo "  Token-ul SE VEDE pe masura ce il tastezi (e lung, ca sa-l poti verifica)."
+    echo "  Nu ajunge in ${LOG}: ecoul caracterelor tastate il face terminalul,"
+    echo "  nu stdout-ul scriptului, deci 'tee' nu il captureaza."
+    echo "  Ramane insa in scrollback-ul terminalului - da 'clear' dupa instalare"
+    echo "  daca lucrezi pe un ecran la care au acces si altii."
+    echo
+    while true; do
+        read -r -p "  -> Cloudflare API Token: " CF_TOKEN || true
+        # Taie spatii/tab-uri/newline lipite la copy-paste
+        CF_TOKEN="${CF_TOKEN//[[:space:]]/}"
+
+        if [[ -z "${CF_TOKEN:-}" ]]; then
+            warn "Token-ul nu poate fi gol."
+            continue
+        fi
+
+        # Confirmarea mascata merge DOAR pe terminal, ca sa nu ajunga in log.
+        if [[ -w /dev/tty ]]; then
+            printf '     ai introdus %d caractere: %s...%s\n' \
+                "${#CF_TOKEN}" "${CF_TOKEN:0:4}" "${CF_TOKEN: -4}" > /dev/tty 2>/dev/null || true
+        fi
+
+        # Validare la Cloudflare INAINTE de instalare. Fara asta, o greseala de
+        # tastare se descopera abia la pasul 7/12, dupa ~10 minute de instalare,
+        # iar acme.sh esueaza cu un mesaj greu de interpretat.
+        # curl se instaleaza abia la 1/12; pe o imagine minimala poate lipsi aici.
+        if ! command -v curl >/dev/null 2>&1; then
+            warn "curl nu e instalat inca - sar peste verificarea token-ului."
+            warn "Daca token-ul e gresit, vei vedea eroarea la pasul 7/12."
+            break
+        fi
+
+        echo "     Verific token-ul la Cloudflare..."
+        CF_CHECK="$(curl -fsS -m 20 \
+            -H "Authorization: Bearer ${CF_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://api.cloudflare.com/client/v4/user/tokens/verify" 2>/dev/null || true)"
+
+        # Compactam raspunsul: API-ul poate returna '"success": true' cu spatiu.
+        CF_CHECK_COMPACT="${CF_CHECK//[[:space:]]/}"
+        if [[ "$CF_CHECK_COMPACT" == *'"success":true'* ]]; then
+            info "Token valid si activ la Cloudflare."
+            break
+        fi
+
+        warn "Cloudflare NU a acceptat token-ul (sau serverul nu are internet)."
+        if [[ -n "$CF_CHECK" ]]; then
+            echo "     Raspuns API: $CF_CHECK"
+        else
+            echo "     Niciun raspuns de la api.cloudflare.com."
+        fi
+        _cf_retry=""
+        read -r -p "  Reintroduci token-ul? (da = reincerc / nu = continui oricum): " _cf_retry || true
+        [[ "${_cf_retry,,}" == "da" ]] || { warn "Continui cu token-ul neverificat."; break; }
     done
-    info "Token Cloudflare primit (nu va fi afisat in log)."
 else
     info "Sar peste configurarea webmail-ului acum. Poti rula sectiunea manual mai tarziu."
 fi
@@ -215,6 +263,49 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y nginx
 systemctl enable --now nginx
 
 mkdir -p /etc/nginx/ssl
+
+# ── Evitarea erorii "directive is duplicate" ──────────────────────────────────
+# Ubuntu livreaza /etc/nginx/nginx.conf cu o parte din aceste directive deja
+# setate in blocul http{} (server_tokens, ssl_protocols,
+# ssl_prefer_server_ciphers, keepalive_timeout). Linia
+#     include /etc/nginx/conf.d/*.conf;
+# se afla in ACELASI bloc http{}, deci redeclararea lor in 00-hardening.conf
+# opreste nginx cu:
+#     nginx: [emerg] "server_tokens" directive is duplicate in
+#            /etc/nginx/conf.d/00-hardening.conf:1
+#
+# Solutia: comentam variantele din nginx.conf si lasam 00-hardening.conf singura
+# sursa de adevar. NU invers - default-ul Ubuntu are 'ssl_protocols TLSv1
+# TLSv1.1 TLSv1.2', adica exact protocoalele pe care vrem sa le eliminam.
+# Operatia e idempotenta: la a doua rulare nu mai gaseste nimic necomentat.
+NGINX_MAIN="/etc/nginx/nginx.conf"
+NGINX_MANAGED=(
+    server_tokens
+    ssl_protocols
+    ssl_prefer_server_ciphers
+    ssl_ciphers
+    ssl_session_cache
+    ssl_session_timeout
+    ssl_session_tickets
+    keepalive_timeout
+    client_max_body_size
+    client_body_timeout
+    client_header_timeout
+    send_timeout
+)
+
+if [[ -f "$NGINX_MAIN" ]]; then
+    [[ -f "${NGINX_MAIN}.orig-prehardening" ]] || \
+        cp -a "$NGINX_MAIN" "${NGINX_MAIN}.orig-prehardening"
+
+    for _d in "${NGINX_MANAGED[@]}"; do
+        if grep -Eq "^[[:space:]]*${_d}[[:space:]]" "$NGINX_MAIN"; then
+            sed -i -E "s|^([[:space:]]*)(${_d}[[:space:]].*)$|\1# \2   # mutat in conf.d/00-hardening.conf|" "$NGINX_MAIN"
+            info "nginx.conf: comentat '${_d}' (gestionat acum in 00-hardening.conf)"
+        fi
+    done
+    info "Backup nginx.conf original: ${NGINX_MAIN}.orig-prehardening"
+fi
 
 # Hardening global (TLS modern, rate-limiting, ascunde versiunea) - aplicat la
 # nivel de http{}, site-urile individuale isi pot suprascrie propriile valori
