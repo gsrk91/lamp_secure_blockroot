@@ -482,10 +482,32 @@ section "5/11 - Postfix ca relay client prin Mailjet"
 MAILJET_HOST="in-v3.mailjet.com"
 MAILJET_PORT="587"
 
-echo "${MAILJET_HOST}:${MAILJET_PORT}    ${MAILJET_API_KEY}:${MAILJET_SECRET_KEY}" > /etc/postfix/sasl_passwd
+# ── Credentialele SASL ────────────────────────────────────────────────────────
+# CHEIA TREBUIE SCRISA EXACT CA IN 'relayhost', cu paranteze drepte.
+# Postfix cauta parola dupa "next-hop destination", adica exact sirul din
+# relayhost. Pentru 'relayhost = [in-v3.mailjet.com]:587' incearca, in ordine:
+#     [in-v3.mailjet.com]:587
+#     [in-v3.mailjet.com]
+#     in-v3.mailjet.com
+# Forma 'in-v3.mailjet.com:587' (fara paranteze) NU e niciuna dintre ele.
+# Daca nu gaseste nimic, Postfix se conecteaza ANONIM, fara sa scrie nicio
+# eroare in log, iar Mailjet raspunde:
+#     554 5.7.1 <destinatar>: Relay access denied
+# Simptomul care il tradeaza: in log apare "Trusted TLS connection established"
+# dar NICIO linie despre SASL. Daca autentificarea ar fi esuat, ai vedea
+# "SASL authentication failed".
+printf '[%s]:%s\t%s:%s\n' \
+    "$MAILJET_HOST" "$MAILJET_PORT" "$MAILJET_API_KEY" "$MAILJET_SECRET_KEY" \
+    > /etc/postfix/sasl_passwd
 chmod 600 /etc/postfix/sasl_passwd
 postmap /etc/postfix/sasl_passwd
 chmod 600 /etc/postfix/sasl_passwd.db
+
+# Modulele SASL client - fara ele Postfix nu are niciun mecanism de autentificare
+# si esueaza cu "SASL authentication failed: no mechanism available".
+if ! dpkg -l libsasl2-modules 2>/dev/null | grep -q '^ii'; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libsasl2-modules
+fi
 
 # postconf -e este idempotent - sigur de rulat de mai multe ori (nu dubleaza linii)
 postconf -e "relayhost = [${MAILJET_HOST}]:${MAILJET_PORT}"
@@ -547,6 +569,18 @@ postconf -e "smtpd_sasl_authenticated_header = yes"
 systemctl restart postfix
 info "Postfix configurat sa foloseasca Mailjet (${MAILJET_HOST}:${MAILJET_PORT}) ca relay de iesire."
 
+# Verificam ca Postfix chiar GASESTE credentialele pentru next-hop-ul configurat.
+# Fara asta, greseala de mai sus (cheie fara paranteze) ar trece neobservata pana
+# la primul bounce cu "Relay access denied".
+if postmap -q "[${MAILJET_HOST}]:${MAILJET_PORT}" hash:/etc/postfix/sasl_passwd >/dev/null 2>&1; then
+    info "Credentiale SASL gasite pentru [${MAILJET_HOST}]:${MAILJET_PORT}."
+else
+    warn "Postfix NU gaseste credentiale pentru [${MAILJET_HOST}]:${MAILJET_PORT}!"
+    warn "Autentificarea nu se va face, iar Mailjet va raspunde 'Relay access denied'."
+    warn "Verifica /etc/postfix/sasl_passwd - cheia trebuie sa fie exact:"
+    warn "  [${MAILJET_HOST}]:${MAILJET_PORT}<TAB>APIKEY:SECRETKEY"
+fi
+
 echo
 # Testam prin POSTFIX, nu cu swaks direct.
 # Motiv de securitate: 'swaks --auth-password "$SECRET"' pune cheia in linia de
@@ -570,10 +604,20 @@ if printf 'Subject: %s\nFrom: postmaster@%s\nTo: %s\n\n%s\n' \
 
     if grep -q "relay=${MAILJET_HOST}.*status=sent" "$MAILLOG" 2>/dev/null; then
         info "Test relay: SUCCES - Mailjet a acceptat mesajul. Verifica ${ADMIN_EMAIL}."
-    elif grep -qi "relay=${MAILJET_HOST}.*\(status=bounced\|SASL\|authentication failed\)" "$MAILLOG" 2>/dev/null; then
+    elif grep -q "Relay access denied" "$MAILLOG" 2>/dev/null; then
+        warn "Mailjet: 'Relay access denied' - conexiunea NU a fost autentificata."
+        warn "Verifica daca Postfix gaseste credentialele:"
+        warn "  sudo postmap -q '[${MAILJET_HOST}]:${MAILJET_PORT}' hash:/etc/postfix/sasl_passwd >/dev/null && echo GASITA || echo NEGASITA"
+        warn "Cheia din sasl_passwd trebuie sa fie identica cu relayhost, cu paranteze."
+    elif grep -qi "SASL authentication failed" "$MAILLOG" 2>/dev/null; then
         warn "Mailjet a RESPINS autentificarea. Cauze frecvente:"
-        warn "  - API Key / Secret Key gresite sau inversate"
-        warn "  - expeditorul postmaster@${PRIMARY_DOMAIN} nu e validat in Mailjet"
+        warn "  - API Key / Secret Key gresite, inversate, sau din contextul gresit"
+        warn "    (cheia contului principal in loc de cea a sub-account-ului)"
+        warn "  - lipsesc modulele: sudo apt-get install -y libsasl2-modules"
+        warn "Detalii: sudo grep -i sasl ${MAILLOG} | tail -20"
+    elif grep -qi "relay=${MAILJET_HOST}.*status=bounced" "$MAILLOG" 2>/dev/null; then
+        warn "Mailjet a respins mesajul. Cel mai probabil expeditorul"
+        warn "postmaster@${PRIMARY_DOMAIN} nu e validat pe cheia API folosita."
         warn "Detalii: sudo grep ${MAILJET_HOST} ${MAILLOG} | tail -20"
     elif grep -q "status=deferred.*TLS is required" "$MAILLOG" 2>/dev/null; then
         warn "Mesajul e blocat la predarea catre Amavis din cauza politicii TLS."
