@@ -14,10 +14,6 @@
 #      roundcube/sogo) + jail-uri proprii (sshd port custom, webmin, recidive)
 #    - UFW: deny in/out, mail public (25/587/465/993), web public (80/443),
 #      SSH + Webmin DOAR din LAN pe porturi custom + protectie anti auto-lockout
-#      IMPORTANT: iRedMail dezactiveaza UFW pe Ubuntu si porneste nftables, in mod
-#      NECONDITIONAT (nu conteaza ce raspunzi in wizard). Scriptul detecteaza asta
-#      si reactiveaza UFW imediat dupa instalarea iRedMail - altfel ai ramas cu
-#      'ufw status' = inactive si, foarte probabil, fara niciun firewall activ.
 #
 #  SECURITATE (gandita ca un cybersecurity manager):
 #    - SSH pe PORT CUSTOM, hardening complet (cripto moderna, root off, faillock)
@@ -349,17 +345,8 @@ fi
 
 ufw --force enable
 info "UFW activat: mail public (25/587/465/993/995), web public (80/443), SSH+Webmin doar din $LAN_SUBNET."
-echo
-warn "DE STIUT despre firewall si iRedMail (nu e ceva ce poti evita raspunzand"
-warn "'nu' in wizard - se intampla oricum):"
-warn "  iRedMail DEZACTIVEAZA serviciul ufw pe Ubuntu, necondiționat, si porneste"
-warn "  nftables in locul lui. Vezi functions/packages.sh din sursa lui:"
-warn "      export DISABLED_SERVICES=\"\${DISABLED_SERVICES} ufw\""
-warn "      ENABLED_SERVICES=\"\${ENABLED_SERVICES} nftables\""
-warn "  Raspunsul 'nu' la intrebarea despre firewall opreste doar rescrierea"
-warn "  fisierului de reguli, NU dezactivarea UFW."
-warn "  De aceea scriptul REACTIVEAZA UFW imediat dupa instalarea iRedMail."
-warn "  Raspunde tot 'nu' la firewall in wizard (ca sa nu-ti scrie reguli inutile)."
+warn "IMPORTANT: cand instalatorul iRedMail te va intreba daca vrea sa configureze"
+warn "propriul firewall (iptables), raspunde NU - UFW deja acopera tot."
 
 # ══════════════════════════════════════════════════════════════════════════════
 section "4/11 - Instalare iRedMail (PARTEA INTERACTIVA)"
@@ -489,52 +476,6 @@ bash iRedMail.sh < /dev/tty > /dev/tty 2>&1 || \
 
 info "iRedMail instalat. Log complet: /var/log/iRedMail.log"
 
-# ── Reparare firewall: iRedMail a dezactivat UFW si a pornit nftables ─────────
-# Pe Ubuntu, iRedMail face asta NECONDITIONAT (functions/packages.sh):
-#     export DISABLED_SERVICES="${DISABLED_SERVICES} ufw"
-#     ALL_PKGS="${ALL_PKGS} nftables"
-#     ENABLED_SERVICES="${ENABLED_SERVICES} nftables"
-# Plus seteaza FAIL2BAN_ACTION='nftables-multiport' (conf/fail2ban).
-#
-# Daca nu reparam aici, rezultatul e: 'sudo ufw status' -> inactive, iar daca ai
-# raspuns NU la rescrierea regulilor, /etc/nftables.conf ramane cel implicit
-# Ubuntu (permisiv) => serverul ramane FARA firewall propriu, complet descoperit
-# in spatele routerului.
-#
-# ORDINEA E CRITICA: nftables.service are 'ExecStop=/usr/sbin/nft flush ruleset',
-# deci oprirea lui sterge TOT ruleset-ul din kernel - inclusiv regulile UFW, daca
-# UFW ar fi fost deja repornit. De aceea oprim nftables INTAI, apoi pornim UFW.
-info "Verific ce a facut iRedMail cu firewall-ul..."
-
-if systemctl is-enabled nftables >/dev/null 2>&1 || systemctl is-active nftables >/dev/null 2>&1; then
-    warn "Confirmat: iRedMail a activat nftables. Il opresc si revin la UFW."
-    systemctl disable --now nftables 2>/dev/null || true
-else
-    info "nftables nu e activ - nimic de oprit."
-fi
-
-systemctl unmask ufw 2>/dev/null || true
-systemctl enable ufw 2>/dev/null || true
-ufw --force enable
-
-sleep 1
-if ufw status 2>/dev/null | grep -q "Status: active"; then
-    info "UFW reactivat cu succes dupa iRedMail."
-else
-    warn "UFW NU s-a reactivat. Repara manual INAINTE de a continua:"
-    warn "  sudo systemctl disable --now nftables"
-    warn "  sudo systemctl enable --now ufw && sudo ufw --force enable"
-fi
-
-# Verificam explicit ca regula de SSH a supravietuit - altfel descoperi problema
-# abia cand inchizi sesiunea si nu mai poti intra.
-if ufw status 2>/dev/null | grep -q "${SSH_PORT}"; then
-    info "Regula SSH pe portul ${SSH_PORT} confirmata in UFW."
-else
-    warn "ATENTIE: nu vad regula SSH pe portul ${SSH_PORT}. NU INCHIDE sesiunea curenta!"
-    warn "Adaug-o acum: sudo ufw limit from ${LAN_SUBNET} to any port ${SSH_PORT} proto tcp"
-fi
-
 # ══════════════════════════════════════════════════════════════════════════════
 section "5/11 - Postfix ca relay client prin Mailjet"
 # ══════════════════════════════════════════════════════════════════════════════
@@ -552,8 +493,51 @@ postconf -e "smtp_sasl_auth_enable = yes"
 postconf -e "smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd"
 postconf -e "smtp_sasl_security_options = noanonymous"
 postconf -e "smtp_sasl_tls_security_options = noanonymous"
-postconf -e "smtp_tls_security_level = encrypt"
+
+# ── TLS: obligatoriu spre Mailjet, optional in rest ───────────────────────────
+# ATENTIE, capcana care blocheaza TOT mailul:
+#   postconf -e "smtp_tls_security_level = encrypt"
+# pare corect ("vreau TLS spre Mailjet"), dar se aplica GLOBAL, deci si predarii
+# interne catre Amavis pe 127.0.0.1:10024 / :10026. Amavis nu ofera STARTTLS pe
+# loopback (nu are de ce), asa ca Postfix refuza sa predea mesajul:
+#   status=deferred (TLS is required, but was not offered by host 127.0.0.1)
+# Efectul: se blocheaza si iesirea, si INTRAREA - tot mailul trece prin Amavis.
+#
+# Solutia corecta: 'may' global (oportunist) + o politica per-destinatie care
+# ridica cerinta la 'encrypt' exact pentru Mailjet.
+postconf -e "smtp_tls_security_level = may"
+
+printf '[%s]:%s\tencrypt\n[%s]\tencrypt\n%s\tencrypt\n' \
+    "$MAILJET_HOST" "$MAILJET_PORT" "$MAILJET_HOST" "$MAILJET_HOST" \
+    > /etc/postfix/tls_policy
+if postmap /etc/postfix/tls_policy 2>/dev/null; then
+    postconf -e "smtp_tls_policy_maps = hash:/etc/postfix/tls_policy"
+else
+    # Postfix recent poate fi compilat fara Berkeley DB; lmdb e mereu prezent.
+    postmap lmdb:/etc/postfix/tls_policy
+    postconf -e "smtp_tls_policy_maps = lmdb:/etc/postfix/tls_policy"
+fi
+info "TLS: 'may' global, 'encrypt' fortat doar catre ${MAILJET_HOST}."
+
 postconf -e "smtp_tls_wrappermode = no"
+
+# ── IPv4 / IPv6 ───────────────────────────────────────────────────────────────
+# iRedMail lasa 'inet_protocols = all', deci Postfix cere SI A, SI AAAA pentru
+# fiecare destinatie. Pe un server fara IPv6 rutabil (cazul obisnuit in spatele
+# unui router de casa sau la un ISP fara IPv6), daca resolverul raspunde cu
+# eroare temporara la AAAA in loc de "nu exista", livrarea e amanata chiar daca
+# A s-a rezolvat perfect:
+#   relay=none, status=deferred (Host or domain name not found.
+#   Name service error for name=in-v3.mailjet.com type=AAAA: Host not found, try again)
+# Observa 'relay=none' - Postfix nici macar nu incearca sa se conecteze.
+# ATENTIE: inet_protocols se citeste DOAR la pornire, deci e nevoie de
+# 'systemctl restart postfix', nu de 'reload' (scriptul face restart mai jos).
+if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6'; then
+    info "IPv6 global detectat - las inet_protocols = all."
+else
+    postconf -e "inet_protocols = ipv4"
+    info "Fara IPv6 global - setez inet_protocols = ipv4 (evita esecurile pe AAAA)."
+fi
 postconf -e "smtp_tls_note_starttls_offer = yes"
 postconf -e "header_size_limit = 4096000"
 # Header-ul asta ajuta fail2ban/postfix.iredmail sa vada IP-ul real al clientilor
@@ -579,7 +563,8 @@ if printf 'Subject: %s\nFrom: postmaster@%s\nTo: %s\n\n%s\n' \
         | sendmail -f "postmaster@${PRIMARY_DOMAIN}" "$ADMIN_EMAIL"; then
 
     info "Mesaj predat lui Postfix. Astept confirmarea livrarii catre Mailjet..."
-    sleep 10
+    # Mailul trece intai prin Amavis (antivirus/antispam), care adauga latenta.
+    sleep 20
     MAILLOG="/var/log/mail.log"
     [[ -f "$MAILLOG" ]] || MAILLOG="/var/log/maillog"
 
@@ -590,6 +575,18 @@ if printf 'Subject: %s\nFrom: postmaster@%s\nTo: %s\n\n%s\n' \
         warn "  - API Key / Secret Key gresite sau inversate"
         warn "  - expeditorul postmaster@${PRIMARY_DOMAIN} nu e validat in Mailjet"
         warn "Detalii: sudo grep ${MAILJET_HOST} ${MAILLOG} | tail -20"
+    elif grep -q "status=deferred.*TLS is required" "$MAILLOG" 2>/dev/null; then
+        warn "Mesajul e blocat la predarea catre Amavis din cauza politicii TLS."
+        warn "Nu ar trebui sa se intample (setam 'may' global), dar verifica:"
+        warn "  sudo postconf -n | grep smtp_tls"
+        warn "  smtp_tls_security_level TREBUIE sa fie 'may', nu 'encrypt'."
+    elif grep -q "type=AAAA.*Host not found" "$MAILLOG" 2>/dev/null; then
+        warn "Livrarea esueaza pe interogarea DNS de tip AAAA (IPv6)."
+        warn "Verifica: sudo postconf -n | grep inet_protocols  (ar trebui 'ipv4')"
+        warn "Daca lipseste:  sudo postconf -e 'inet_protocols = ipv4'"
+        warn "                sudo systemctl restart postfix && sudo postqueue -f"
+        warn "Verifica si resolverul:  dig AAAA ${MAILJET_HOST} | grep status"
+        warn "  SERVFAIL = problema de DNS mai larga, nu doar cu Mailjet."
     else
         warn "Inca nu am confirmarea livrarii (poate dura). Verifica peste un minut:"
         warn "  sudo mailq"
@@ -695,21 +692,9 @@ EOF
 # ATENTIE: iRedMail scrie in jail.local un ignoreip care albeste TOT spatiul privat
 # (10/8, 172.16/12, 192.168/16). Il suprascriem din jail.d/*.local, care se citeste
 # ULTIMUL (ordinea reala: jail.conf -> jail.d/*.conf -> jail.local -> jail.d/*.local).
-# banaction = ufw: iRedMail configureaza fail2ban cu 'nftables-multiport', dar noi
-# am revenit la UFW dupa instalare. Actiunea nftables ar functiona si asa (fail2ban
-# isi creeaza propriile tabele 'f2b-*' prin binarul nft, independent de serviciul
-# nftables), dar am avea DOUA mecanisme paralele de blocare. Setam UFW ca mecanism
-# implicit pentru jail-urile noastre, ca sa fie totul intr-un singur loc.
-# NOTA: jail-urile proprii ale iRedMail (postfix, dovecot, roundcube) isi declara
-# explicit 'action = nftables-multiport[...]', iar un 'action' explicit bate
-# 'banaction' din [DEFAULT] - deci acelea vor continua sa banEze prin nft.
-# Functioneaza corect, doar sa nu te surprinda cand vezi ambele mecanisme in
-# 'sudo nft list ruleset' si 'sudo ufw status'.
 cat > /etc/fail2ban/jail.d/zz-custom-00-default.local << 'EOF'
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1
-banaction = ufw
-banaction_allports = ufw
 EOF
 
 if systemctl restart fail2ban; then
@@ -976,10 +961,8 @@ echo "  repo git, fisier de config al unei aplicatii web expuse, backup"
 echo "  nesecurizat, log de CI/CD. Verifica si acolo, nu doar pe server."
 echo
 echo "  === VERIFICARI ==="
-echo "    sudo ufw status verbose                       (trebuie: Status: active)"
-echo "    sudo systemctl is-enabled ufw                 (trebuie: enabled)"
-echo "    sudo systemctl is-enabled nftables            (trebuie: disabled/masked)"
 echo "    sudo fail2ban-client status"
+echo "    sudo ufw status verbose"
 echo "    sudo mailq                                    (coada de trimitere)"
 echo "    sudo grep ${MAILJET_HOST} /var/log/mail.log | tail -20"
 echo "    sudo postconf -n | grep -E 'relayhost|sasl'   (config relay)"
