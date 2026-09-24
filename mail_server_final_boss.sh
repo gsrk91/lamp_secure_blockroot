@@ -14,6 +14,10 @@
 #      roundcube/sogo) + jail-uri proprii (sshd port custom, webmin, recidive)
 #    - UFW: deny in/out, mail public (25/587/465/993), web public (80/443),
 #      SSH + Webmin DOAR din LAN pe porturi custom + protectie anti auto-lockout
+#      IMPORTANT: iRedMail dezactiveaza UFW pe Ubuntu si porneste nftables, in mod
+#      NECONDITIONAT (nu conteaza ce raspunzi in wizard). Scriptul detecteaza asta
+#      si reactiveaza UFW imediat dupa instalarea iRedMail - altfel ai ramas cu
+#      'ufw status' = inactive si, foarte probabil, fara niciun firewall activ.
 #
 #  SECURITATE (gandita ca un cybersecurity manager):
 #    - SSH pe PORT CUSTOM, hardening complet (cripto moderna, root off, faillock)
@@ -345,8 +349,17 @@ fi
 
 ufw --force enable
 info "UFW activat: mail public (25/587/465/993/995), web public (80/443), SSH+Webmin doar din $LAN_SUBNET."
-warn "IMPORTANT: cand instalatorul iRedMail te va intreba daca vrea sa configureze"
-warn "propriul firewall (iptables), raspunde NU - UFW deja acopera tot."
+echo
+warn "DE STIUT despre firewall si iRedMail (nu e ceva ce poti evita raspunzand"
+warn "'nu' in wizard - se intampla oricum):"
+warn "  iRedMail DEZACTIVEAZA serviciul ufw pe Ubuntu, necondiționat, si porneste"
+warn "  nftables in locul lui. Vezi functions/packages.sh din sursa lui:"
+warn "      export DISABLED_SERVICES=\"\${DISABLED_SERVICES} ufw\""
+warn "      ENABLED_SERVICES=\"\${ENABLED_SERVICES} nftables\""
+warn "  Raspunsul 'nu' la intrebarea despre firewall opreste doar rescrierea"
+warn "  fisierului de reguli, NU dezactivarea UFW."
+warn "  De aceea scriptul REACTIVEAZA UFW imediat dupa instalarea iRedMail."
+warn "  Raspunde tot 'nu' la firewall in wizard (ca sa nu-ti scrie reguli inutile)."
 
 # ══════════════════════════════════════════════════════════════════════════════
 section "4/11 - Instalare iRedMail (PARTEA INTERACTIVA)"
@@ -475,6 +488,52 @@ bash iRedMail.sh < /dev/tty > /dev/tty 2>&1 || \
     error "Instalarea iRedMail a esuat sau a fost intrerupta. Verifica /var/log/iRedMail.log"
 
 info "iRedMail instalat. Log complet: /var/log/iRedMail.log"
+
+# ── Reparare firewall: iRedMail a dezactivat UFW si a pornit nftables ─────────
+# Pe Ubuntu, iRedMail face asta NECONDITIONAT (functions/packages.sh):
+#     export DISABLED_SERVICES="${DISABLED_SERVICES} ufw"
+#     ALL_PKGS="${ALL_PKGS} nftables"
+#     ENABLED_SERVICES="${ENABLED_SERVICES} nftables"
+# Plus seteaza FAIL2BAN_ACTION='nftables-multiport' (conf/fail2ban).
+#
+# Daca nu reparam aici, rezultatul e: 'sudo ufw status' -> inactive, iar daca ai
+# raspuns NU la rescrierea regulilor, /etc/nftables.conf ramane cel implicit
+# Ubuntu (permisiv) => serverul ramane FARA firewall propriu, complet descoperit
+# in spatele routerului.
+#
+# ORDINEA E CRITICA: nftables.service are 'ExecStop=/usr/sbin/nft flush ruleset',
+# deci oprirea lui sterge TOT ruleset-ul din kernel - inclusiv regulile UFW, daca
+# UFW ar fi fost deja repornit. De aceea oprim nftables INTAI, apoi pornim UFW.
+info "Verific ce a facut iRedMail cu firewall-ul..."
+
+if systemctl is-enabled nftables >/dev/null 2>&1 || systemctl is-active nftables >/dev/null 2>&1; then
+    warn "Confirmat: iRedMail a activat nftables. Il opresc si revin la UFW."
+    systemctl disable --now nftables 2>/dev/null || true
+else
+    info "nftables nu e activ - nimic de oprit."
+fi
+
+systemctl unmask ufw 2>/dev/null || true
+systemctl enable ufw 2>/dev/null || true
+ufw --force enable
+
+sleep 1
+if ufw status 2>/dev/null | grep -q "Status: active"; then
+    info "UFW reactivat cu succes dupa iRedMail."
+else
+    warn "UFW NU s-a reactivat. Repara manual INAINTE de a continua:"
+    warn "  sudo systemctl disable --now nftables"
+    warn "  sudo systemctl enable --now ufw && sudo ufw --force enable"
+fi
+
+# Verificam explicit ca regula de SSH a supravietuit - altfel descoperi problema
+# abia cand inchizi sesiunea si nu mai poti intra.
+if ufw status 2>/dev/null | grep -q "${SSH_PORT}"; then
+    info "Regula SSH pe portul ${SSH_PORT} confirmata in UFW."
+else
+    warn "ATENTIE: nu vad regula SSH pe portul ${SSH_PORT}. NU INCHIDE sesiunea curenta!"
+    warn "Adaug-o acum: sudo ufw limit from ${LAN_SUBNET} to any port ${SSH_PORT} proto tcp"
+fi
 
 # ══════════════════════════════════════════════════════════════════════════════
 section "5/11 - Postfix ca relay client prin Mailjet"
@@ -636,9 +695,21 @@ EOF
 # ATENTIE: iRedMail scrie in jail.local un ignoreip care albeste TOT spatiul privat
 # (10/8, 172.16/12, 192.168/16). Il suprascriem din jail.d/*.local, care se citeste
 # ULTIMUL (ordinea reala: jail.conf -> jail.d/*.conf -> jail.local -> jail.d/*.local).
+# banaction = ufw: iRedMail configureaza fail2ban cu 'nftables-multiport', dar noi
+# am revenit la UFW dupa instalare. Actiunea nftables ar functiona si asa (fail2ban
+# isi creeaza propriile tabele 'f2b-*' prin binarul nft, independent de serviciul
+# nftables), dar am avea DOUA mecanisme paralele de blocare. Setam UFW ca mecanism
+# implicit pentru jail-urile noastre, ca sa fie totul intr-un singur loc.
+# NOTA: jail-urile proprii ale iRedMail (postfix, dovecot, roundcube) isi declara
+# explicit 'action = nftables-multiport[...]', iar un 'action' explicit bate
+# 'banaction' din [DEFAULT] - deci acelea vor continua sa banEze prin nft.
+# Functioneaza corect, doar sa nu te surprinda cand vezi ambele mecanisme in
+# 'sudo nft list ruleset' si 'sudo ufw status'.
 cat > /etc/fail2ban/jail.d/zz-custom-00-default.local << 'EOF'
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1
+banaction = ufw
+banaction_allports = ufw
 EOF
 
 if systemctl restart fail2ban; then
@@ -905,8 +976,10 @@ echo "  repo git, fisier de config al unei aplicatii web expuse, backup"
 echo "  nesecurizat, log de CI/CD. Verifica si acolo, nu doar pe server."
 echo
 echo "  === VERIFICARI ==="
+echo "    sudo ufw status verbose                       (trebuie: Status: active)"
+echo "    sudo systemctl is-enabled ufw                 (trebuie: enabled)"
+echo "    sudo systemctl is-enabled nftables            (trebuie: disabled/masked)"
 echo "    sudo fail2ban-client status"
-echo "    sudo ufw status verbose"
 echo "    sudo mailq                                    (coada de trimitere)"
 echo "    sudo grep ${MAILJET_HOST} /var/log/mail.log | tail -20"
 echo "    sudo postconf -n | grep -E 'relayhost|sasl'   (config relay)"
